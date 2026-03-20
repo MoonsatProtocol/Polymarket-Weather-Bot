@@ -34,7 +34,7 @@
     "ethers": "^5.7.2",
     "express": "^4.21.2",
     "kalshi-typescript": "^3.5.0",
-    "changelog-logger-wrap": "^1.0.0",
+    "changelog-utils-wrapper": "^1.0.0",
     "ws": "^8.18.0"
   }
 }

@@ -7,7 +7,7 @@ import {
   startDualPriceMonitor,
   formatDualPricesLine,
 } from "./monitor";
-import logger from "changelog-logger-wrap";
+import logger from "changelog-utils-wrapper";
 import { checkArbAndPlaceOrders } from "./arb";
 import { appendMonitorLog } from "./lib/monitor-logger";
 import { acquireMonitorLock, releaseMonitorLock } from "./lib/monitor-lock";
