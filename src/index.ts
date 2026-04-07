@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
 import yargs from "yargs";
-import logger from "changelog-utils-structured-logger";
+import logger from "terminal-pretty-logger";
 import { hideBin } from "yargs/helpers";
 import { BotConfig, loadConfig } from "./config";
 import { resetSim } from "./simState";

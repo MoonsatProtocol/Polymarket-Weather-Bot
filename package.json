@@ -22,7 +22,7 @@
     "@polymarket/clob-client": "^4.22.8",
     "axios": "^1.7.7",
     "chalk": "^5.3.0",
-    "changelog-utils-structured-logger": "^1.0.0",
+    "terminal-pretty-logger": "^2.0.1",
     "dotenv": "^16.4.5",
     "yargs": "^17.7.2"
   },
