@@ -1,6 +1,7 @@
 import { BotConfig, getActiveLocations } from "./config";
 import { C, info, ok, skip, warn } from "./colors";
 import { LOCATIONS, getForecast } from "./nws";
+import { getHistoricalDailyMax, historicalBucketFrequency } from "./openmeteo";
 import { hoursUntilResolution, parseTempRange } from "./parsing";
 import {
   PolymarketEvent,
@@ -21,29 +22,48 @@ import { computeAnalytics, printAnalytics } from "./analytics";
 // ── Kelly helpers ─────────────────────────────────────────────────────────────
 
 /**
- * Estimate win probability using hourly NWS temperature data for the target date.
+ * Estimate win probability by blending two independent signals:
  *
- * Logic:
- *  - Base confidence decays with forecast horizon (day 0 = 82%, day 6+ = ~40%)
- *  - The fraction of hourly readings within 3 °F of the forecast peak acts as a
- *    stability signal: a stable temperature curve boosts confidence; a volatile
- *    one reduces it
- *  - Result is clamped to [0.45, 0.90] so Kelly never over- or under-bets
+ *  1. NWS signal — base confidence decays with forecast horizon (day 0 ≈ 82%,
+ *     day 6+ ≈ 40%); hourly temp stability around the forecast peak lifts it.
+ *
+ *  2. Historical climatology (Open-Meteo) — fraction of same-calendar-period
+ *     days over the past 3 years where the daily max fell in the target bucket.
+ *
+ * Blend weights shift with forecast horizon:
+ *   day 0-1  → 70 % NWS  / 30 % history  (short range: trust the model)
+ *   day 3    → 50 % / 50 %
+ *   day 5-6  → 30 % NWS  / 70 % history  (long range: lean on climatology)
+ *
+ * Result is clamped to [0.45, 0.90] so Kelly never over- or under-bets.
  */
 function computeOurProb(
   hourlyTemps: number[],
   forecastTemp: number,
-  daysAhead: number
+  daysAhead: number,
+  histFreq: number | null
 ): number {
+  // ── NWS signal ────────────────────────────────────────────────────────────
   const base = Math.max(0.45, 0.82 - daysAhead * 0.07);
+  let nwsProb: number;
 
   if (hourlyTemps.length > 0) {
     const nearPeak  = hourlyTemps.filter((t) => Math.abs(t - forecastTemp) <= 3).length;
     const stability = nearPeak / hourlyTemps.length; // 0–1
-    return Math.max(0.45, Math.min(0.90, base * (0.70 + 0.30 * stability)));
+    nwsProb = Math.max(0.45, Math.min(0.90, base * (0.70 + 0.30 * stability)));
+  } else {
+    nwsProb = Math.max(0.45, Math.min(0.90, base));
   }
 
-  return Math.max(0.45, Math.min(0.90, base));
+  // ── Historical blend ──────────────────────────────────────────────────────
+  if (histFreq == null) return nwsProb; // no history available — NWS only
+
+  // histWeight rises linearly with horizon: 0.30 at day 0 → 0.70 at day 6
+  const histWeight = Math.min(0.70, 0.30 + daysAhead * 0.067);
+  const nwsWeight  = 1 - histWeight;
+
+  const blended = nwsWeight * nwsProb + histWeight * histFreq;
+  return Math.max(0.45, Math.min(0.90, blended));
 }
 
 /**
@@ -241,8 +261,11 @@ export async function run(options: RunOptions): Promise<void> {
 
       const locData = LOCATIONS[citySlug];
 
-      // Single API call per city — returns both dailyMax and per-day hourly arrays
+      // Single NWS call per city — returns both dailyMax and per-day hourly arrays
       const { dailyMax: forecast, hourlyByDate } = await getForecast(citySlug);
+
+      // Fetch 3-year historical daily max temps (disk-cached 24 h, one call per city)
+      const histData = await getHistoricalDailyMax(citySlug);
       if (!forecast || Object.keys(forecast).length === 0) continue;
 
       for (let i = 0; i < config.days_ahead; i++) {
@@ -312,9 +335,14 @@ export async function run(options: RunOptions): Promise<void> {
           continue;
         }
 
+        // ── Historical climatology frequency ────────────────────────────────
+        // How often did the daily max land in this exact bucket on the same
+        // calendar period across the past 3 years? (±7-day window, Open-Meteo)
+        const histFreq = historicalBucketFrequency(histData, dateStr, matched.range);
+
         // ── Kelly & probability computation ────────────────────────────────
         const hourlyTemps = hourlyByDate[dateStr] ?? [];
-        const ourProb     = computeOurProb(hourlyTemps, forecastTemp, i);
+        const ourProb     = computeOurProb(hourlyTemps, forecastTemp, i, histFreq);
         const rawKelly    = computeKellyPct(ourProb, price);
         const kellyPct    = rawKelly * config.kelly_fraction;
         const positionPct = Math.min(kellyPct, config.max_position_pct);
@@ -322,9 +350,14 @@ export async function run(options: RunOptions): Promise<void> {
         const positionSize = Number((balance * positionPct).toFixed(2));
         const ev          = Number((edge * positionSize).toFixed(2));
 
+        const histFreqStr = histFreq != null
+          ? `Hist freq: ${(histFreq * 100).toFixed(0)}% | `
+          : `Hist freq: n/a | `;
+
         info(`Bucket: ${question.slice(0, 60)}`);
         info(`Market price: $${price.toFixed(3)}`);
         info(
+          `${histFreqStr}` +
           `Our prob: ${(ourProb * 100).toFixed(0)}% | ` +
           `Edge: ${(edge * 100).toFixed(1)}% | ` +
           `Kelly: ${(rawKelly * 100).toFixed(1)}% → ${(positionPct * 100).toFixed(1)}% applied | ` +

@@ -23,3 +23,6 @@ yarn-error.log*
 
 # misc
 package-lock.json
+
+# Open-Meteo disk cache (auto-regenerated, refreshed every 24 h)
+openmeteo-cache.json
