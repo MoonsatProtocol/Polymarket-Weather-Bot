@@ -22,6 +22,44 @@
   --shadow-soft: 0 18px 40px rgba(15, 23, 42, 0.09);
 }
 
+body.dark {
+  --bg: #0f172a;
+  --bg-elevated: #1e293b;
+  --border-soft: #334155;
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --accent: #60a5fa;
+  --accent-soft: rgba(96, 165, 250, 0.08);
+  --accent-strong: rgba(96, 165, 250, 0.18);
+  --success: #4ade80;
+  --danger: #f87171;
+  --shadow-soft: 0 18px 40px rgba(0, 0, 0, 0.4);
+}
+
+body.dark {
+  background: radial-gradient(circle at top, #1e3a5f 0, #0f172a 45%, #0a0f1e 100%);
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.theme-toggle:hover {
+  color: var(--text-main);
+  border-color: var(--accent);
+}
+
 *,
 *::before,
 *::after {
@@ -515,6 +553,7 @@ body {
         <span id="status-text">Waiting for data</span>
       </div>
       <div class="ts" id="ts">—</div>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">☀️</button>
     </div>
   </div>
 
@@ -530,7 +569,7 @@ body {
     <div class="stat">
       <div class="stat-label">Balance</div>
       <div class="stat-val" id="s-bal">—</div>
-      <div class="stat-sub">virtual USDC</div>
+      <div class="stat-sub">available cash</div>
     </div>
     <div class="stat">
       <div class="stat-label">Total PnL</div>
@@ -614,12 +653,6 @@ body {
     </div>
     <div>
       <span class="sim-badge">Simulated balance · $1,000 start</span>
-      &nbsp;·&nbsp;
-      Built by <strong>solship</strong>
-      &nbsp;·&nbsp;
-      <a href="https://github.com/solship" target="_blank" rel="noreferrer">GitHub</a>
-      &nbsp;·&nbsp;
-      <a href="https://t.me/bitship1_1" target="_blank" rel="noreferrer">Telegram</a>
     </div>
   </div>
 </div>
@@ -629,6 +662,22 @@ const fmt2=v=>(v>=0?'+':'')+v.toFixed(2);
 const fmtUSD=v=>'$'+Math.abs(v).toFixed(2);
 const now=()=>new Date().toLocaleTimeString('en-US',{hour12:false});
 const rand=(a,b)=>Math.random()*(b-a)+a;
+
+// Dark/light mode toggle
+(function(){
+  const btn=document.getElementById('theme-toggle');
+  const apply=dark=>{
+    document.body.classList.toggle('dark',dark);
+    btn.textContent=dark?'🌙':'☀️';
+  };
+  const saved=localStorage.getItem('theme');
+  apply(saved==='dark'||(saved===null&&window.matchMedia('(prefers-color-scheme: dark)').matches));
+  btn.addEventListener('click',()=>{
+    const isDark=document.body.classList.toggle('dark');
+    btn.textContent=isDark?'🌙':'☀️';
+    localStorage.setItem('theme',isDark?'dark':'light');
+  });
+})();
 
 let prevBal=null, chart=null, balHistory=[], timeLabels=[];
 
@@ -770,7 +819,7 @@ async function loadData(){
 
     // Stats
     document.getElementById('ts').textContent='Updated '+now();
-    document.getElementById('s-bal').textContent='$'+total.toFixed(2);
+    document.getElementById('s-bal').textContent='$'+bal.toFixed(2);
     const pnlEl=document.getElementById('s-pnl');
     pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);
     pnlEl.className='stat-val'+(pnl<0?' red':'');
