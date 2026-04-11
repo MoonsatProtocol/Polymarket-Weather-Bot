@@ -18,6 +18,7 @@ import {
 } from "./simState";
 import { MONTHS } from "./time";
 import { computeAnalytics, printAnalytics } from "./analytics";
+import { appendDailyLog } from "./dailyLog";
 
 // ── Kelly helpers ─────────────────────────────────────────────────────────────
 
@@ -473,6 +474,7 @@ export async function run(options: RunOptions): Promise<void> {
     sim.positions    = positions;
     sim.peak_balance = Math.max(sim.peak_balance ?? balance, balance);
     await saveSim(sim);
+    await appendDailyLog(sim);
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
