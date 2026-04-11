@@ -1,6 +1,6 @@
 import { BotConfig, getActiveLocations } from "./config";
-import { C, info, ok, skip } from "./colors";
-import { DailyForecast, LOCATIONS, getForecast } from "./nws";
+import { C, info, ok, skip, warn } from "./colors";
+import { LOCATIONS, getForecast } from "./nws";
 import { hoursUntilResolution, parseTempRange } from "./parsing";
 import {
   PolymarketEvent,
@@ -16,17 +16,60 @@ import {
   saveSim
 } from "./simState";
 import { MONTHS } from "./time";
+import { computeAnalytics, printAnalytics } from "./analytics";
 
-const POSITION_PCT = 0.05;
+// ── Kelly helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Estimate win probability using hourly NWS temperature data for the target date.
+ *
+ * Logic:
+ *  - Base confidence decays with forecast horizon (day 0 = 82%, day 6+ = ~40%)
+ *  - The fraction of hourly readings within 3 °F of the forecast peak acts as a
+ *    stability signal: a stable temperature curve boosts confidence; a volatile
+ *    one reduces it
+ *  - Result is clamped to [0.45, 0.90] so Kelly never over- or under-bets
+ */
+function computeOurProb(
+  hourlyTemps: number[],
+  forecastTemp: number,
+  daysAhead: number
+): number {
+  const base = Math.max(0.45, 0.82 - daysAhead * 0.07);
+
+  if (hourlyTemps.length > 0) {
+    const nearPeak  = hourlyTemps.filter((t) => Math.abs(t - forecastTemp) <= 3).length;
+    const stability = nearPeak / hourlyTemps.length; // 0–1
+    return Math.max(0.45, Math.min(0.90, base * (0.70 + 0.30 * stability)));
+  }
+
+  return Math.max(0.45, Math.min(0.90, base));
+}
+
+/**
+ * Kelly criterion for a binary prediction market:
+ *   f* = (our_prob − price) / (1 − price)
+ *
+ * Returns 0 when there is no positive edge (i.e. our_prob ≤ price).
+ */
+function computeKellyPct(ourProb: number, price: number): number {
+  if (price <= 0 || price >= 1) return 0;
+  return Math.max(0, (ourProb - price) / (1 - price));
+}
+
+// ── Public types ──────────────────────────────────────────────────────────────
 
 export interface RunOptions {
   dryRun: boolean;
   config: BotConfig;
 }
 
+// ── showPositions ─────────────────────────────────────────────────────────────
+
 export async function showPositions(): Promise<void> {
-  const sim = await loadSim();
+  const sim       = await loadSim();
   const positions = sim.positions;
+
   console.log(`\n${C.BOLD("📊 Open Positions:")}`);
   const mids = Object.keys(positions);
   if (!mids.length) {
@@ -36,37 +79,41 @@ export async function showPositions(): Promise<void> {
 
   let totalPnl = 0;
   for (const mid of mids) {
-    const pos = positions[mid];
-    const currentPrice =
-      (await getMarketYesPrice(mid)) ?? pos.entry_price ?? 0;
-    const pnl = (currentPrice - pos.entry_price) * pos.shares;
+    const pos          = positions[mid];
+    const currentPrice = (await getMarketYesPrice(mid)) ?? pos.entry_price ?? 0;
+    const pnl          = (currentPrice - pos.entry_price) * pos.shares;
     totalPnl += pnl;
-    const pnlStr =
-      pnl >= 0
-        ? C.GREEN(`+$${pnl.toFixed(2)}`)
-        : C.RED(`-$${Math.abs(pnl).toFixed(2)}`);
+
+    const pnlStr = pnl >= 0
+      ? C.GREEN(`+$${pnl.toFixed(2)}`)
+      : C.RED(`-$${Math.abs(pnl).toFixed(2)}`);
 
     console.log(`\n  • ${pos.question.slice(0, 65)}...`);
     console.log(
-      `    Entry: $${pos.entry_price.toFixed(3)} | Now: $${currentPrice.toFixed(
-        3
-      )} | ` +
-        `Shares: ${pos.shares.toFixed(1)} | PnL: ${pnlStr}`
+      `    Entry: $${pos.entry_price.toFixed(3)} | Now: $${currentPrice.toFixed(3)} | ` +
+      `Shares: ${pos.shares.toFixed(1)} | PnL: ${pnlStr}`
     );
+    if (pos.kelly_pct != null) {
+      console.log(
+        `    Kelly: ${(pos.kelly_pct * 100).toFixed(1)}% | ` +
+        `EV: ${pos.ev != null ? `$${pos.ev.toFixed(2)}` : "n/a"} | ` +
+        `Our prob: ${pos.our_prob != null ? `${(pos.our_prob * 100).toFixed(0)}%` : "n/a"}`
+      );
+    }
     console.log(`    Cost: $${pos.cost.toFixed(2)}`);
   }
 
   console.log(`\n  Balance:      $${sim.balance.toFixed(2)}`);
   const pnlColor = totalPnl >= 0 ? C.GREEN : C.RED;
   console.log(
-    `  Open PnL:     ${pnlColor(
-      `${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`
-    )}`
+    `  Open PnL:     ${pnlColor(`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`)}`
   );
   console.log(
     `  Total trades: ${sim.total_trades} | W/L: ${sim.wins}/${sim.losses}`
   );
 }
+
+// ── run ───────────────────────────────────────────────────────────────────────
 
 export async function run(options: RunOptions): Promise<void> {
   const { dryRun, config } = options;
@@ -74,44 +121,50 @@ export async function run(options: RunOptions): Promise<void> {
   console.log(`\n${C.BOLD(C.CYAN("🌤  Weather Trading Bot v1 (TS)"))}`);
   console.log("=".repeat(50));
 
-  const sim = await loadSim();
-  let balance = sim.balance;
+  const sim       = await loadSim();
+  let   balance   = sim.balance;
   const positions = sim.positions;
-  let tradesExecuted = 0;
-  let exitsFound = 0;
+  let   tradesExecuted = 0;
+  let   exitsFound     = 0;
 
   const mode = dryRun
     ? `${C.YELLOW("PAPER MODE")}`
     : `${C.GREEN("LIVE MODE")}`;
 
-  const starting = sim.starting_balance;
+  const starting    = sim.starting_balance;
   const totalReturn = ((balance - starting) / starting) * 100;
-  const returnStr =
-    totalReturn >= 0
-      ? C.GREEN(`+${totalReturn.toFixed(1)}%`)
-      : C.RED(`${totalReturn.toFixed(1)}%`);
+  const returnStr   = totalReturn >= 0
+    ? C.GREEN(`+${totalReturn.toFixed(1)}%`)
+    : C.RED(`${totalReturn.toFixed(1)}%`);
 
+  const openCost  = Object.values(positions).reduce((s, p) => s + p.cost, 0);
+  const openRisk  = balance > 0 ? openCost / balance : 0;
+
+  // ── Header ───────────────────────────────────────────────────────────────
   console.log(`\n  Mode:            ${mode}`);
   console.log(
-    `  Virtual balance: ${C.BOLD(
-      `$${balance.toFixed(2)}`
-    )} (started $${starting.toFixed(2)}, ${returnStr})`
+    `  Virtual balance: ${C.BOLD(`$${balance.toFixed(2)}`)} ` +
+    `(started $${starting.toFixed(2)}, ${returnStr})`
   );
   console.log(
-    `  Position size:   ${(POSITION_PCT * 100).toFixed(
-      0
-    )}% of balance per trade`
+    `  Kelly fraction:  ${(config.kelly_fraction * 100).toFixed(0)}% | ` +
+    `Max position:    ${(config.max_position_pct * 100).toFixed(0)}%`
   );
   console.log(
-    `  Entry threshold: below $${config.entry_threshold.toFixed(2)}`
+    `  Entry threshold: below $${config.entry_threshold.toFixed(2)} | ` +
+    `Min edge: ${(config.min_edge * 100).toFixed(0)}%`
   );
+  console.log(`  Exit threshold:  above $${config.exit_threshold.toFixed(2)}`);
   console.log(
-    `  Exit threshold:  above $${config.exit_threshold.toFixed(2)}`
+    `  Open risk:       ${(openRisk * 100).toFixed(1)}% of balance ` +
+    `(max ${(config.max_open_risk * 100).toFixed(0)}%)`
   );
   console.log(`  Trades W/L:      ${sim.wins}/${sim.losses}`);
+  console.log(`  Days ahead:      ${config.days_ahead}`);
 
-  // --- CHECK EXITS ---
+  // ── CHECK EXITS ───────────────────────────────────────────────────────────
   console.log(`\n${C.BOLD("📤 Checking exits...")}`);
+
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
     if (currentPrice == null) continue;
@@ -119,219 +172,290 @@ export async function run(options: RunOptions): Promise<void> {
     if (currentPrice >= config.exit_threshold) {
       exitsFound += 1;
       const pnl = (currentPrice - pos.entry_price) * pos.shares;
+
+      // Hold time for richer exit logging
+      const holdHours = pos.opened_at
+        ? (Date.now() - new Date(pos.opened_at).getTime()) / 3_600_000
+        : null;
+      const holdStr = holdHours != null ? ` | Held: ${holdHours.toFixed(0)}h` : "";
+
       ok(`EXIT: ${pos.question.slice(0, 50)}...`);
       info(
-        `Price $${currentPrice.toFixed(
-          3
-        )} >= exit $${config.exit_threshold.toFixed(2)} | PnL: +$${pnl.toFixed(
-          2
-        )}`
+        `Price $${currentPrice.toFixed(3)} >= exit $${config.exit_threshold.toFixed(2)} | ` +
+        `PnL: ${pnl >= 0 ? C.GREEN(`+$${pnl.toFixed(2)}`) : C.RED(`-$${Math.abs(pnl).toFixed(2)}`)}${holdStr}`
       );
 
       if (!dryRun) {
         balance += pos.cost + pnl;
-        if (pnl > 0) sim.wins += 1;
-        else sim.losses += 1;
+        if (pnl > 0) sim.wins   += 1;
+        else         sim.losses += 1;
+
         const trade: Trade = {
-          type: "exit",
-          question: pos.question,
+          type:        "exit",
+          question:    pos.question,
           entry_price: pos.entry_price,
-          exit_price: currentPrice,
-          pnl: Number(pnl.toFixed(2)),
-          cost: pos.cost,
-          closed_at: new Date().toISOString()
+          exit_price:  currentPrice,
+          pnl:         Number(pnl.toFixed(2)),
+          cost:        pos.cost,
+          closed_at:   new Date().toISOString(),
+          // Carry analytics fields through from the original position
+          location:   pos.location,
+          date:       pos.date,
+          kelly_pct:  pos.kelly_pct,
+          ev:         pos.ev,
+          our_prob:   pos.our_prob
         };
         sim.trades.push(trade);
         delete positions[mid];
-        ok(
-          `Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`
-        );
+        ok(`Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
       } else {
         skip("Paper mode — not selling");
       }
     }
   }
 
-  if (exitsFound === 0) {
-    skip("No exit opportunities");
-  }
+  if (exitsFound === 0) skip("No exit opportunities");
 
-  // --- SCAN ENTRIES ---
+  // ── SCAN ENTRIES ──────────────────────────────────────────────────────────
   console.log(`\n${C.BOLD("🔍 Scanning for entry signals...")}`);
 
-  const activeLocations = getActiveLocations(config);
-  for (const citySlug of activeLocations) {
-    if (!(citySlug in LOCATIONS)) {
-      continue;
-    }
+  // Global pre-checks before iterating locations
+  const currentOpenRisk =
+    balance > 0
+      ? Object.values(positions).reduce((s, p) => s + p.cost, 0) / balance
+      : 0;
 
-    const locData = LOCATIONS[citySlug];
-    const forecast: DailyForecast = await getForecast(citySlug);
-    if (!forecast || Object.keys(forecast).length === 0) continue;
+  if (balance < config.min_balance_floor) {
+    warn(
+      `Balance $${balance.toFixed(2)} below floor $${config.min_balance_floor.toFixed(2)} — skipping all entries`
+    );
+  } else if (currentOpenRisk >= config.max_open_risk) {
+    warn(
+      `Open risk ${(currentOpenRisk * 100).toFixed(1)}% >= max ${(config.max_open_risk * 100).toFixed(0)}% — skipping all entries`
+    );
+  } else {
+    const activeLocations = getActiveLocations(config);
 
-    for (let i = 0; i < 4; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().slice(0, 10);
-      const month = MONTHS[date.getMonth()];
-      const day = date.getDate();
-      const year = date.getFullYear();
+    for (const citySlug of activeLocations) {
+      if (!(citySlug in LOCATIONS)) continue;
 
-      const forecastTemp = forecast[dateStr];
-      if (forecastTemp == null) continue;
+      const locData = LOCATIONS[citySlug];
 
-      const event: PolymarketEvent | null = await getPolymarketEvent(
-        citySlug,
-        month,
-        day,
-        year
-      );
-      if (!event) continue;
+      // Single API call per city — returns both dailyMax and per-day hourly arrays
+      const { dailyMax: forecast, hourlyByDate } = await getForecast(citySlug);
+      if (!forecast || Object.keys(forecast).length === 0) continue;
 
-      const hoursLeft = hoursUntilResolution(event);
+      for (let i = 0; i < config.days_ahead; i++) {
+        const date    = new Date();
+        date.setDate(date.getDate() + i);
+        const dateStr = date.toISOString().slice(0, 10);
+        const month   = MONTHS[date.getMonth()];
+        const day     = date.getDate();
+        const year    = date.getFullYear();
 
-      console.log(`\n${C.BOLD(`📍 ${locData.name} — ${dateStr}`)}`);
-      info(
-        `Forecast: ${forecastTemp}°F | Resolves in: ${hoursLeft.toFixed(0)}h`
-      );
+        const forecastTemp = forecast[dateStr];
+        if (forecastTemp == null) continue;
 
-      if (hoursLeft < config.min_hours_to_resolution) {
-        skip(`Resolves in ${hoursLeft.toFixed(0)}h — too soon`);
-        continue;
-      }
+        const event: PolymarketEvent | null = await getPolymarketEvent(
+          citySlug, month, day, year
+        );
+        if (!event) continue;
 
-      // Find matching temperature bucket
-      let matched:
-        | {
-            market: PolymarketMarket;
-            question: string;
-            price: number;
-            range: [number, number];
-          }
-        | null = null;
+        const hoursLeft = hoursUntilResolution(event);
 
-      for (const market of event.markets ?? []) {
-        const question = market.question ?? "";
-        const rng = parseTempRange(question);
-        if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
-          try {
-            const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
-            const prices = JSON.parse(pricesStr) as number[];
-            const yesPrice = Number(prices[0]);
-            if (!isFinite(yesPrice)) continue;
-            matched = {
-              market,
-              question,
-              price: yesPrice,
-              range: rng
-            };
-          } catch {
-            continue;
-          }
-          break;
+        console.log(`\n${C.BOLD(`📍 ${locData.name} — ${dateStr}`)}`);
+        info(`Forecast: ${forecastTemp}°F | Resolves in: ${hoursLeft.toFixed(0)}h | Day +${i}`);
+
+        if (hoursLeft < config.min_hours_to_resolution) {
+          skip(`Resolves in ${hoursLeft.toFixed(0)}h — too soon`);
+          continue;
         }
-      }
 
-      if (!matched) {
-        skip(`No bucket found for ${forecastTemp}°F`);
-        continue;
-      }
+        // ── Find matching temperature bucket ────────────────────────────────
+        let matched: {
+          market:   PolymarketMarket;
+          question: string;
+          price:    number;
+          range:    [number, number];
+        } | null = null;
 
-      const price = matched.price;
-      const marketId = matched.market.id;
-      const question = matched.question;
+        for (const market of event.markets ?? []) {
+          const question = market.question ?? "";
+          const rng      = parseTempRange(question);
+          if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
+            try {
+              const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
+              const prices    = JSON.parse(pricesStr) as number[];
+              const yesPrice  = Number(prices[0]);
+              if (!isFinite(yesPrice)) continue;
+              matched = { market, question, price: yesPrice, range: rng };
+            } catch {
+              continue;
+            }
+            break;
+          }
+        }
 
-      info(`Bucket: ${question.slice(0, 60)}`);
-      info(`Market price: $${price.toFixed(3)}`);
+        if (!matched) {
+          skip(`No bucket found for ${forecastTemp}°F`);
+          continue;
+        }
 
-      if (price >= config.entry_threshold) {
-        skip(
-          `Price $${price.toFixed(
-            3
-          )} above threshold $${config.entry_threshold.toFixed(2)}`
+        const price    = matched.price;
+        const marketId = matched.market.id;
+        const question = matched.question;
+
+        // ── Volume filter ───────────────────────────────────────────────────
+        const volume = matched.market.volume ?? 0;
+        if (config.min_volume > 0 && volume < config.min_volume) {
+          skip(`Volume $${volume.toFixed(0)} below min $${config.min_volume.toFixed(0)}`);
+          continue;
+        }
+
+        // ── Kelly & probability computation ────────────────────────────────
+        const hourlyTemps = hourlyByDate[dateStr] ?? [];
+        const ourProb     = computeOurProb(hourlyTemps, forecastTemp, i);
+        const rawKelly    = computeKellyPct(ourProb, price);
+        const kellyPct    = rawKelly * config.kelly_fraction;
+        const positionPct = Math.min(kellyPct, config.max_position_pct);
+        const edge        = ourProb - price;
+        const positionSize = Number((balance * positionPct).toFixed(2));
+        const ev          = Number((edge * positionSize).toFixed(2));
+
+        info(`Bucket: ${question.slice(0, 60)}`);
+        info(`Market price: $${price.toFixed(3)}`);
+        info(
+          `Our prob: ${(ourProb * 100).toFixed(0)}% | ` +
+          `Edge: ${(edge * 100).toFixed(1)}% | ` +
+          `Kelly: ${(rawKelly * 100).toFixed(1)}% → ${(positionPct * 100).toFixed(1)}% applied | ` +
+          `EV: $${ev.toFixed(2)}`
         );
-        continue;
-      }
 
-      const positionSize = Number((balance * POSITION_PCT).toFixed(2));
-      const shares = positionSize / price;
+        // ── Entry threshold ─────────────────────────────────────────────────
+        if (price >= config.entry_threshold) {
+          skip(`Price $${price.toFixed(3)} above threshold $${config.entry_threshold.toFixed(2)}`);
+          continue;
+        }
 
-      ok(
-        `SIGNAL — buying ${shares.toFixed(
-          1
-        )} shares @ $${price.toFixed(3)} = $${positionSize.toFixed(2)}`
-      );
+        // ── Minimum edge gate ───────────────────────────────────────────────
+        if (edge < config.min_edge) {
+          skip(`Edge ${(edge * 100).toFixed(1)}% below min ${(config.min_edge * 100).toFixed(0)}%`);
+          continue;
+        }
 
-      if (positions[marketId]) {
-        skip("Already in this market");
-        continue;
-      }
+        // ── Kelly yields no bet ─────────────────────────────────────────────
+        if (positionPct <= 0) {
+          skip("Kelly sizing yields zero — no positive edge");
+          continue;
+        }
 
-      if (tradesExecuted >= config.max_trades_per_run) {
-        skip(`Max trades (${config.max_trades_per_run}) reached`);
-        continue;
-      }
+        // ── Duplicate position ──────────────────────────────────────────────
+        if (positions[marketId]) {
+          skip("Already in this market");
+          continue;
+        }
 
-      if (positionSize < 0.5) {
-        skip(`Position size $${positionSize.toFixed(2)} too small`);
-        continue;
-      }
+        // ── Max trades per run ──────────────────────────────────────────────
+        if (tradesExecuted >= config.max_trades_per_run) {
+          skip(`Max trades (${config.max_trades_per_run}) reached`);
+          continue;
+        }
 
-      if (!dryRun) {
-        balance -= positionSize;
-        const pos: Position = {
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          date: dateStr,
-          location: citySlug,
-          forecast_temp: forecastTemp,
-          opened_at: new Date().toISOString()
-        };
-        positions[marketId] = pos;
-        sim.total_trades += 1;
-        const trade: Trade = {
-          type: "entry",
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          opened_at: pos.opened_at
-        };
-        sim.trades.push(trade);
-        tradesExecuted += 1;
+        // ── Min position size ───────────────────────────────────────────────
+        if (positionSize < 0.5) {
+          skip(`Position size $${positionSize.toFixed(2)} too small`);
+          continue;
+        }
+
+        // ── Per-trade open-risk re-check (recalculated after each entry) ────
+        const updatedOpenRisk =
+          balance > 0
+            ? Object.values(positions).reduce((s, p) => s + p.cost, 0) / balance
+            : 0;
+        if (updatedOpenRisk >= config.max_open_risk) {
+          skip(
+            `Open risk ${(updatedOpenRisk * 100).toFixed(1)}% would exceed ` +
+            `${(config.max_open_risk * 100).toFixed(0)}%`
+          );
+          continue;
+        }
+
+        const shares = positionSize / price;
+
         ok(
-          `Position opened — $${positionSize.toFixed(
-            2
-          )} deducted from balance`
+          `SIGNAL — buying ${shares.toFixed(1)} shares @ $${price.toFixed(3)} = ` +
+          `$${positionSize.toFixed(2)} (${(positionPct * 100).toFixed(1)}% Kelly)`
         );
-      } else {
-        skip("Paper mode — not buying");
-        tradesExecuted += 1;
+
+        if (!dryRun) {
+          balance -= positionSize;
+
+          const pos: Position = {
+            question,
+            entry_price:   price,
+            shares,
+            cost:          positionSize,
+            date:          dateStr,
+            location:      citySlug,
+            forecast_temp: forecastTemp,
+            opened_at:     new Date().toISOString(),
+            // Analytics fields (previously reserved, now populated)
+            kelly_pct: Number(kellyPct.toFixed(4)),
+            ev,
+            our_prob:  Number(ourProb.toFixed(4))
+          };
+          positions[marketId] = pos;
+
+          sim.total_trades += 1;
+
+          const trade: Trade = {
+            type:        "entry",
+            question,
+            entry_price: price,
+            shares,
+            cost:        positionSize,
+            opened_at:   pos.opened_at,
+            // Populate analytics fields on the trade record too
+            kelly_pct: pos.kelly_pct,
+            ev:        pos.ev,
+            our_prob:  pos.our_prob,
+            location:  citySlug,
+            date:      dateStr
+          };
+          sim.trades.push(trade);
+          tradesExecuted += 1;
+
+          ok(`Position opened — $${positionSize.toFixed(2)} deducted from balance`);
+        } else {
+          skip("Paper mode — not buying");
+          tradesExecuted += 1;
+        }
       }
     }
   }
 
+  // ── Save state ────────────────────────────────────────────────────────────
   if (!dryRun) {
-    sim.balance = Number(balance.toFixed(2));
-    sim.positions = positions;
+    sim.balance      = Number(balance.toFixed(2));
+    sim.positions    = positions;
     sim.peak_balance = Math.max(sim.peak_balance ?? balance, balance);
     await saveSim(sim);
   }
 
+  // ── Summary ───────────────────────────────────────────────────────────────
   console.log(`\n${"=".repeat(50)}`);
-  console.log(`${C.BOLD("📊 Summary:")}`);
+  console.log(`${C.BOLD("📊 Run Summary:")}`);
   info(`Balance:         $${balance.toFixed(2)}`);
   info(`Trades this run: ${tradesExecuted}`);
   info(`Exits found:     ${exitsFound}`);
 
+  // Derived analytics — computed from existing sim data, no schema changes
+  const analytics = computeAnalytics(sim);
+  printAnalytics(analytics);
+
   if (dryRun) {
     console.log(
-      `\n  ${C.YELLOW(
-        "[PAPER MODE — use --live to simulate trades]"
-      )}`
+      `\n  ${C.YELLOW("[PAPER MODE — use --live to simulate trades]")}`
     );
   }
 }
-
