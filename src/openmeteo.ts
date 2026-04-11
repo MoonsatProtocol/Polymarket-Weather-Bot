@@ -18,10 +18,11 @@ import { LOCATIONS } from "./nws";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const ARCHIVE_BASE  = "https://archive-api.open-meteo.com/v1/archive";
-const CACHE_FILE    = path.resolve(__dirname, "..", "openmeteo-cache.json");
-const CACHE_TTL_MS  = 24 * 60 * 60 * 1000; // 24 hours
-const HISTORY_YEARS = 3;
+const ARCHIVE_BASE       = "https://archive-api.open-meteo.com/v1/archive";
+const FORECAST_BASE      = "https://api.open-meteo.com/v1/forecast";
+const CACHE_FILE         = path.resolve(__dirname, "..", "openmeteo-cache.json");
+const CACHE_TTL_MS       = 24 * 60 * 60 * 1000; // 24 hours
+const HISTORY_YEARS      = 3;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -121,6 +122,66 @@ export async function getHistoricalDailyMax(
     // Fall back to stale cache if available
     return existing?.data ?? {};
   }
+}
+
+// ── Open-Meteo forecast (for non-NWS cities) ─────────────────────────────────
+
+/**
+ * Fetches an NWS-compatible ForecastData object for any city in the world
+ * using the Open-Meteo forecast API.
+ *
+ * Used as a drop-in replacement for NWS getForecast() for international cities
+ * that have no NWS coverage (Seoul, Shanghai, Tokyo, etc.).
+ *
+ * Returns the same ForecastData shape:
+ *   { dailyMax: Record<date, °F>, hourlyByDate: Record<date, °F[]> }
+ */
+export async function getForecastFromOpenMeteo(
+  citySlug: string,
+  daysAhead = 7
+): Promise<import("./nws").ForecastData> {
+  const loc = LOCATIONS[citySlug];
+  if (!loc) return { dailyMax: {}, hourlyByDate: {} };
+
+  const url =
+    `${FORECAST_BASE}` +
+    `?latitude=${loc.lat}&longitude=${loc.lon}` +
+    `&hourly=temperature_2m` +
+    `&daily=temperature_2m_max` +
+    `&temperature_unit=fahrenheit` +
+    `&timezone=auto` +
+    `&forecast_days=${daysAhead}`;
+
+  const dailyMax:    import("./nws").DailyForecast        = {};
+  const hourlyByDate: Record<string, number[]>            = {};
+
+  try {
+    const r = await axios.get(url, { timeout: REQUEST_TIMEOUT_MS });
+
+    // ── Daily max (one value per day) ──────────────────────────────────────
+    const dailyTimes = (r.data?.daily?.time                ?? []) as string[];
+    const dailyMaxes = (r.data?.daily?.temperature_2m_max  ?? []) as (number | null)[];
+    for (let i = 0; i < dailyTimes.length; i++) {
+      const v = dailyMaxes[i];
+      if (typeof v === "number") dailyMax[dailyTimes[i]] = Math.round(v * 10) / 10;
+    }
+
+    // ── Hourly temps (grouped by date for probability estimation) ──────────
+    const hourlyTimes = (r.data?.hourly?.time          ?? []) as string[];
+    const hourlyTemps = (r.data?.hourly?.temperature_2m ?? []) as (number | null)[];
+    for (let i = 0; i < hourlyTimes.length; i++) {
+      const dateStr = hourlyTimes[i].slice(0, 10);
+      const v       = hourlyTemps[i];
+      if (typeof v === "number") {
+        if (!hourlyByDate[dateStr]) hourlyByDate[dateStr] = [];
+        hourlyByDate[dateStr].push(Math.round(v * 10) / 10);
+      }
+    }
+  } catch (e) {
+    warn(`Open-Meteo forecast fetch failed for ${citySlug}: ${String(e)}`);
+  }
+
+  return { dailyMax, hourlyByDate };
 }
 
 // ── Historical frequency helper ───────────────────────────────────────────────

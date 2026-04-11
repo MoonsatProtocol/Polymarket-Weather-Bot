@@ -1,10 +1,11 @@
 import axios from "axios";
-import { warn } from "./colors";
+import { warn, info } from "./colors";
 
 export const LOCATIONS: Record<
   string,
   { lat: number; lon: number; name: string }
 > = {
+  // ── US cities (NWS + Open-Meteo) ──────────────────────────────────────────
   nyc:           { lat: 40.7772,  lon: -73.8726,   name: "New York City"  },
   chicago:       { lat: 41.9742,  lon: -87.9073,   name: "Chicago"        },
   miami:         { lat: 25.7959,  lon: -80.2870,   name: "Miami"          },
@@ -18,7 +19,14 @@ export const LOCATIONS: Record<
   las_vegas:     { lat: 36.0840,  lon: -115.1537,  name: "Las Vegas"      },
   san_francisco: { lat: 37.6188,  lon: -122.3750,  name: "San Francisco"  },
   los_angeles:   { lat: 33.9425,  lon: -118.4081,  name: "Los Angeles"    },
-  portland:      { lat: 45.5898,  lon: -122.5951,  name: "Portland"       }
+  portland:      { lat: 45.5898,  lon: -122.5951,  name: "Portland"       },
+  // ── International cities (Open-Meteo forecast only — no NWS coverage) ─────
+  seoul:         { lat: 37.5665,  lon: 126.9780,   name: "Seoul"          },
+  shanghai:      { lat: 31.2304,  lon: 121.4737,   name: "Shanghai"       },
+  wellington:    { lat: -41.2865, lon: 174.7762,   name: "Wellington"     },
+  tokyo:         { lat: 35.6762,  lon: 139.6503,   name: "Tokyo"          },
+  shenzhen:      { lat: 22.5431,  lon: 114.0579,   name: "Shenzhen"       },
+  chengdu:       { lat: 30.5728,  lon: 104.0668,   name: "Chengdu"        }
 };
 
 export const NWS_ENDPOINTS: Record<string, string> = {
@@ -67,6 +75,13 @@ export interface ForecastData {
 }
 
 export async function getForecast(citySlug: string): Promise<ForecastData> {
+  // International cities have no NWS coverage — route to Open-Meteo forecast
+  if (!NWS_ENDPOINTS[citySlug]) {
+    info(`${citySlug}: no NWS coverage — using Open-Meteo forecast`);
+    const { getForecastFromOpenMeteo } = await import("./openmeteo");
+    return getForecastFromOpenMeteo(citySlug);
+  }
+
   const forecastUrl = NWS_ENDPOINTS[citySlug];
   const stationId   = STATION_IDS[citySlug];
   const dailyMax: DailyForecast                = {};
