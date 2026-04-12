@@ -36,6 +36,12 @@ export interface BotConfig {
   days_ahead: number;
   /** Skip markets whose total volume (USD) is below this value. 0 = no filter. */
   min_volume: number;
+
+  // ── Telegram notifications ────────────────────────────────────────────────
+  /** Bot token from @BotFather. Leave blank to disable notifications. */
+  telegram_bot_token: string;
+  /** Your Telegram chat ID. Get it by messaging your bot then calling getUpdates. */
+  telegram_chat_id: string;
 }
 
 export const DEFAULT_CONFIG: BotConfig = {
@@ -59,7 +65,10 @@ export const DEFAULT_CONFIG: BotConfig = {
   min_balance_floor:   50,
   // Coverage
   days_ahead:  7,
-  min_volume:  0
+  min_volume:  0,
+  // Telegram
+  telegram_bot_token: "",
+  telegram_chat_id:   ""
 };
 
 export async function loadConfig(): Promise<BotConfig> {
@@ -114,7 +123,11 @@ export async function loadConfig(): Promise<BotConfig> {
 
     // ── Market coverage ────────────────────────────────────────────────────
     days_ahead: parseNumber(process.env.DAYS_AHEAD,  DEFAULT_CONFIG.days_ahead),
-    min_volume: parseNumber(process.env.MIN_VOLUME,  DEFAULT_CONFIG.min_volume)
+    min_volume: parseNumber(process.env.MIN_VOLUME,  DEFAULT_CONFIG.min_volume),
+
+    // ── Telegram ───────────────────────────────────────────────────────────
+    telegram_bot_token: process.env.TELEGRAM_BOT_TOKEN ?? "",
+    telegram_chat_id:   process.env.TELEGRAM_CHAT_ID   ?? ""
   };
 }
 

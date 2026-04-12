@@ -19,6 +19,7 @@ import {
 import { MONTHS } from "./time";
 import { computeAnalytics, printAnalytics } from "./analytics";
 import { appendDailyLog } from "./dailyLog";
+import { maybeSendNotification } from "./telegram";
 
 // ── Kelly helpers ─────────────────────────────────────────────────────────────
 
@@ -504,6 +505,7 @@ export async function run(options: RunOptions): Promise<void> {
     sim.peak_balance = Math.max(sim.peak_balance ?? balance, balance);
     await saveSim(sim);
     await appendDailyLog(sim);
+    await maybeSendNotification(sim, config.telegram_bot_token, config.telegram_chat_id);
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
