@@ -10,7 +10,7 @@
  * bot runs don't re-download multi-year datasets on every interval tick.
  */
 
-import axios from "axios";
+import axios from "./http";
 import fs from "fs/promises";
 import path from "path";
 import { warn, info } from "./colors";

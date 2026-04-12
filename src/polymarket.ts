@@ -1,10 +1,12 @@
-import axios from "axios";
+import axios from "./http";
 import { warn } from "./colors";
 
 export interface PolymarketEvent {
   id: string;
   endDate?: string;
   end_date_iso?: string;
+  /** Resolved end date — whichever field the API returns */
+  resolvedEndDate?: string;
   markets?: PolymarketMarket[];
   [key: string]: any;
 }
@@ -33,6 +35,9 @@ export async function getPolymarketEvent(
     const data = r.data;
     if (Array.isArray(data) && data.length > 0) {
       const event = data[0] as PolymarketEvent;
+      // Normalise end date — API returns it under different keys depending on version
+      event.resolvedEndDate =
+        event.endDate ?? event.end_date_iso ?? (event as any).end_date ?? undefined;
       // Hydrate volume/liquidity from nested markets if present at event level
       if (Array.isArray(event.markets)) {
         event.markets = event.markets.map((m: any) => ({

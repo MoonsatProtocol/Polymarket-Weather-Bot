@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios from "./http";
 import { warn, info } from "./colors";
 
 export const LOCATIONS: Record<

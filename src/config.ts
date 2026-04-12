@@ -44,7 +44,7 @@ export const DEFAULT_CONFIG: BotConfig = {
   exit_threshold:         0.45,
   max_trades_per_run:     5,
   min_hours_to_resolution: 2,
-  locations:              "nyc,chicago,miami,dallas,seattle,atlanta,seoul,shanghai,wellington,tokyo,shenzhen,chengdu",
+  locations:              "seoul,shanghai,wellington,tokyo,shenzhen,chengdu",
   // Wallet
   polymarket_private_key:            "",
   polymarket_proxy_wallet_address:   "",

@@ -2,7 +2,7 @@ import { BotConfig, getActiveLocations } from "./config";
 import { C, info, ok, skip, warn } from "./colors";
 import { LOCATIONS, getForecast } from "./nws";
 import { getHistoricalDailyMax, historicalBucketFrequency } from "./openmeteo";
-import { hoursUntilResolution, parseTempRange } from "./parsing";
+import { hoursUntilResolution, parseTempRange, forecastInMarketUnit } from "./parsing";
 import {
   PolymarketEvent,
   PolymarketMarket,
@@ -188,94 +188,75 @@ export async function run(options: RunOptions): Promise<void> {
 
   const today = new Date().toISOString().slice(0, 10);
 
+  const closeExit = async (
+    mid: string,
+    pos: Position,
+    exitPrice: number,
+    label: string
+  ): Promise<void> => {
+    const pnl = (exitPrice - pos.entry_price) * pos.shares;
+    exitsFound += 1;
+    ok(`${label}: ${pos.question.slice(0, 50)}...`);
+    info(
+      `Exit price: $${exitPrice.toFixed(3)} | ` +
+      `PnL: ${pnl >= 0 ? C.GREEN(`+$${pnl.toFixed(2)}`) : C.RED(`-$${Math.abs(pnl).toFixed(2)}`)}`
+    );
+    if (!dryRun) {
+      balance += pos.cost + pnl;
+      if (pnl > 0) sim.wins += 1; else sim.losses += 1;
+      sim.trades.push({
+        type: "exit", question: pos.question,
+        entry_price: pos.entry_price, exit_price: exitPrice,
+        pnl: Number(pnl.toFixed(2)), cost: pos.cost,
+        closed_at: new Date().toISOString(),
+        location: pos.location, date: pos.date,
+        kelly_pct: pos.kelly_pct, ev: pos.ev, our_prob: pos.our_prob
+      });
+      delete positions[mid];
+      ok(`Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
+    } else {
+      skip("Paper mode — not closing");
+    }
+  };
+
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
 
-    // ── Resolution check: position date is in the past ───────────────────
-    // The market has closed. Price ≥ 0.95 = resolved YES (win).
-    // Price ≤ 0.05 or null = resolved NO or delisted (loss).
+    // ── Update live price on position for dashboard display ───────────────
+    if (!dryRun && currentPrice != null) {
+      pos.current_price = currentPrice;
+    }
+
+    // ── Resolution: market date is in the past ────────────────────────────
+    // Price ≥ 0.95 = resolved YES (win). Price ≤ 0.05 or null = resolved NO (loss).
     if (pos.date && pos.date < today) {
       const resolvedPrice = currentPrice ?? 0;
-      const won           = resolvedPrice >= 0.95;
-      const pnl           = (resolvedPrice - pos.entry_price) * pos.shares;
-
-      exitsFound += 1;
+      const won = resolvedPrice >= 0.95;
       const resultLabel = won ? C.GREEN("WIN ✅") : C.RED("LOSS ❌");
-      ok(`RESOLVED ${resultLabel}: ${pos.question.slice(0, 50)}...`);
-      info(
-        `Final price: $${resolvedPrice.toFixed(3)} | ` +
-        `PnL: ${pnl >= 0 ? C.GREEN(`+$${pnl.toFixed(2)}`) : C.RED(`-$${Math.abs(pnl).toFixed(2)}`)}`
-      );
+      await closeExit(mid, pos, resolvedPrice, `RESOLVED ${resultLabel}`);
+      continue;
+    }
 
-      if (!dryRun) {
-        balance += pos.cost + pnl;
-        if (won) sim.wins   += 1;
-        else     sim.losses += 1;
-
-        sim.trades.push({
-          type:        "exit",
-          question:    pos.question,
-          entry_price: pos.entry_price,
-          exit_price:  resolvedPrice,
-          pnl:         Number(pnl.toFixed(2)),
-          cost:        pos.cost,
-          closed_at:   new Date().toISOString(),
-          location:    pos.location,
-          date:        pos.date,
-          kelly_pct:   pos.kelly_pct,
-          ev:          pos.ev,
-          our_prob:    pos.our_prob
-        });
-        delete positions[mid];
-        ok(`Settled — ${won ? "YES" : "NO"} | PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
-      } else {
-        skip("Paper mode — not settling");
+    // ── Pre-close: sell 2 hours before market closes ──────────────────────
+    if (pos.closes_at) {
+      const hoursLeft = (new Date(pos.closes_at).getTime() - Date.now()) / 3_600_000;
+      if (hoursLeft <= 2 && hoursLeft >= 0) {
+        const exitPrice = currentPrice ?? pos.entry_price;
+        await closeExit(mid, pos, exitPrice, `PRE-CLOSE (${hoursLeft.toFixed(1)}h left)`);
+        continue;
       }
-      continue; // skip normal threshold check for this position
     }
 
     // ── Normal exit: price crossed threshold before resolution ────────────
     if (currentPrice == null) continue;
 
     if (currentPrice >= config.exit_threshold) {
-      exitsFound += 1;
-      const pnl = (currentPrice - pos.entry_price) * pos.shares;
-
       const holdHours = pos.opened_at
         ? (Date.now() - new Date(pos.opened_at).getTime()) / 3_600_000
         : null;
       const holdStr = holdHours != null ? ` | Held: ${holdHours.toFixed(0)}h` : "";
-
-      ok(`EXIT: ${pos.question.slice(0, 50)}...`);
-      info(
-        `Price $${currentPrice.toFixed(3)} >= exit $${config.exit_threshold.toFixed(2)} | ` +
-        `PnL: ${pnl >= 0 ? C.GREEN(`+$${pnl.toFixed(2)}`) : C.RED(`-$${Math.abs(pnl).toFixed(2)}`)}${holdStr}`
-      );
-
-      if (!dryRun) {
-        balance += pos.cost + pnl;
-        if (pnl > 0) sim.wins   += 1;
-        else         sim.losses += 1;
-
-        sim.trades.push({
-          type:        "exit",
-          question:    pos.question,
-          entry_price: pos.entry_price,
-          exit_price:  currentPrice,
-          pnl:         Number(pnl.toFixed(2)),
-          cost:        pos.cost,
-          closed_at:   new Date().toISOString(),
-          location:    pos.location,
-          date:        pos.date,
-          kelly_pct:   pos.kelly_pct,
-          ev:          pos.ev,
-          our_prob:    pos.our_prob
-        });
-        delete positions[mid];
-        ok(`Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
-      } else {
-        skip("Paper mode — not selling");
-      }
+      info(`Price $${currentPrice.toFixed(3)} >= exit $${config.exit_threshold.toFixed(2)}${holdStr}`);
+      await closeExit(mid, pos, currentPrice, "EXIT");
     }
   }
 
@@ -350,6 +331,8 @@ export async function run(options: RunOptions): Promise<void> {
         for (const market of event.markets ?? []) {
           const question = market.question ?? "";
           const rng      = parseTempRange(question);
+          // parseTempRange always returns °F-equivalent values.
+          // forecastTemp is also in °F from Open-Meteo, so comparison is correct.
           if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
             try {
               const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
@@ -477,7 +460,9 @@ export async function run(options: RunOptions): Promise<void> {
             location:      citySlug,
             forecast_temp: forecastTemp,
             opened_at:     new Date().toISOString(),
-            // Analytics fields (previously reserved, now populated)
+            closes_at:     event.resolvedEndDate ?? undefined,
+            current_price: price,
+            // Analytics fields
             kelly_pct: Number(kellyPct.toFixed(4)),
             ev,
             our_prob:  Number(ourProb.toFixed(4))

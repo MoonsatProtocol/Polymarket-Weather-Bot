@@ -730,18 +730,26 @@ function renderPositions(positions){
   document.getElementById('pos-badge').textContent=keys.length+' active';
   if(!keys.length){el.innerHTML='<div class="empty">No open positions.</div>';return;}
   el.innerHTML=Object.entries(positions).map(([id,p])=>{
-    const pnl=p.pnl||0;
-    const pct=(p.current_price||p.entry_price)*100;
+    const livePrice = p.current_price || p.entry_price || 0;
+    const livePnl   = (livePrice - (p.entry_price||0)) * (p.shares||0);
+    const pct       = Math.min(100, livePrice * 100);
+    const closesAt  = p.closes_at ? new Date(p.closes_at) : null;
+    const hoursLeft = closesAt ? (closesAt - Date.now()) / 3600000 : null;
+    const closeStr  = hoursLeft != null && hoursLeft > 0
+      ? `closes in ${hoursLeft.toFixed(1)}h`
+      : closesAt ? 'closed' : '';
+    const priceChange = livePrice - (p.entry_price||0);
+    const priceStr = `$${(p.entry_price||0).toFixed(3)} → $${livePrice.toFixed(3)} (${priceChange>=0?'+':''}${(priceChange*100).toFixed(1)}¢)`;
     return`<div class="pos-item">
       <div class="pos-top">
         <div class="pos-q">${(p.question||'').substr(0,80)}${(p.question||'').length>80?'…':''}</div>
-        <div class="pos-pnl ${pnl>=0?'pos':'neg'}">${pnl>=0?'+':'-'}$${Math.abs(pnl).toFixed(2)}</div>
+        <div class="pos-pnl ${livePnl>=0?'pos':'neg'}">${livePnl>=0?'+':'-'}$${Math.abs(livePnl).toFixed(2)}</div>
       </div>
-      <div class="pos-bar"><div class="pos-fill" style="width:${Math.min(100,pct)}%"></div></div>
+      <div class="pos-bar"><div class="pos-fill" style="width:${pct}%"></div></div>
       <div class="pos-meta">
-        <div>${p.location||''} · ${p.date||''}</div>
+        <div>${p.location||''} · ${p.date||''} ${closeStr?'· <span style="color:var(--danger)">'+closeStr+'</span>':''}</div>
+        <div>Price <span>${priceStr}</span></div>
         <div>Kelly <span>${((p.kelly_pct||0)*100).toFixed(1)}%</span></div>
-        <div>EV <span>${fmt2(p.ev||0)}</span> per $1</div>
         <div>Size <span>$${(p.cost||0).toFixed(2)}</span></div>
       </div>
     </div>`;
