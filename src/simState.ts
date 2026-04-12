@@ -17,6 +17,7 @@ export interface Position {
   // Optional fields used by dashboard v2
   pnl?: number;
   current_price?: number;
+  closes_at?: string;       // ISO datetime when the market resolves — used for pre-close exit
   kelly_pct?: number;
   ev?: number;
   our_prob?: number;

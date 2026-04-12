@@ -1,48 +1,10 @@
 {
-  "balance": 902.5,
-  "starting_balance": 1000,
-  "positions": {
-    "1585989": {
-      "question": "Will the highest temperature in Atlanta be between 52-53°F on March 18?",
-      "entry_price": 0.145,
-      "shares": 344.82758620689657,
-      "cost": 50,
-      "date": "2026-03-18",
-      "location": "atlanta",
-      "forecast_temp": 53,
-      "opened_at": "2026-03-16T21:50:52.497Z"
-    },
-    "1625931": {
-      "question": "Will the highest temperature in Chicago be between 62-63°F on March 21?",
-      "entry_price": 0.117,
-      "shares": 405.98290598290595,
-      "cost": 47.5,
-      "date": "2026-03-21",
-      "location": "chicago",
-      "forecast_temp": 63,
-      "opened_at": "2026-03-19T08:41:42.334Z"
-    }
-  },
-  "trades": [
-    {
-      "type": "entry",
-      "question": "Will the highest temperature in Atlanta be between 52-53°F on March 18?",
-      "entry_price": 0.145,
-      "shares": 344.82758620689657,
-      "cost": 50,
-      "opened_at": "2026-03-16T21:50:52.497Z"
-    },
-    {
-      "type": "entry",
-      "question": "Will the highest temperature in Chicago be between 62-63°F on March 21?",
-      "entry_price": 0.117,
-      "shares": 405.98290598290595,
-      "cost": 47.5,
-      "opened_at": "2026-03-19T08:41:42.334Z"
-    }
-  ],
-  "total_trades": 2,
+  "balance": 1000.00,
+  "starting_balance": 1000.00,
+  "positions": {},
+  "trades": [],
+  "total_trades": 0,
   "wins": 0,
   "losses": 0,
-  "peak_balance": 1000
+  "peak_balance": 1000.00
 }
