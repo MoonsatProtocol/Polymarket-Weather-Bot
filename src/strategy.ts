@@ -186,15 +186,61 @@ export async function run(options: RunOptions): Promise<void> {
   // ── CHECK EXITS ───────────────────────────────────────────────────────────
   console.log(`\n${C.BOLD("📤 Checking exits...")}`);
 
+  const today = new Date().toISOString().slice(0, 10);
+
   for (const [mid, pos] of Object.entries(positions)) {
     const currentPrice = await getMarketYesPrice(mid);
+
+    // ── Resolution check: position date is in the past ───────────────────
+    // The market has closed. Price ≥ 0.95 = resolved YES (win).
+    // Price ≤ 0.05 or null = resolved NO or delisted (loss).
+    if (pos.date && pos.date < today) {
+      const resolvedPrice = currentPrice ?? 0;
+      const won           = resolvedPrice >= 0.95;
+      const pnl           = (resolvedPrice - pos.entry_price) * pos.shares;
+
+      exitsFound += 1;
+      const resultLabel = won ? C.GREEN("WIN ✅") : C.RED("LOSS ❌");
+      ok(`RESOLVED ${resultLabel}: ${pos.question.slice(0, 50)}...`);
+      info(
+        `Final price: $${resolvedPrice.toFixed(3)} | ` +
+        `PnL: ${pnl >= 0 ? C.GREEN(`+$${pnl.toFixed(2)}`) : C.RED(`-$${Math.abs(pnl).toFixed(2)}`)}`
+      );
+
+      if (!dryRun) {
+        balance += pos.cost + pnl;
+        if (won) sim.wins   += 1;
+        else     sim.losses += 1;
+
+        sim.trades.push({
+          type:        "exit",
+          question:    pos.question,
+          entry_price: pos.entry_price,
+          exit_price:  resolvedPrice,
+          pnl:         Number(pnl.toFixed(2)),
+          cost:        pos.cost,
+          closed_at:   new Date().toISOString(),
+          location:    pos.location,
+          date:        pos.date,
+          kelly_pct:   pos.kelly_pct,
+          ev:          pos.ev,
+          our_prob:    pos.our_prob
+        });
+        delete positions[mid];
+        ok(`Settled — ${won ? "YES" : "NO"} | PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
+      } else {
+        skip("Paper mode — not settling");
+      }
+      continue; // skip normal threshold check for this position
+    }
+
+    // ── Normal exit: price crossed threshold before resolution ────────────
     if (currentPrice == null) continue;
 
     if (currentPrice >= config.exit_threshold) {
       exitsFound += 1;
       const pnl = (currentPrice - pos.entry_price) * pos.shares;
 
-      // Hold time for richer exit logging
       const holdHours = pos.opened_at
         ? (Date.now() - new Date(pos.opened_at).getTime()) / 3_600_000
         : null;
@@ -211,7 +257,7 @@ export async function run(options: RunOptions): Promise<void> {
         if (pnl > 0) sim.wins   += 1;
         else         sim.losses += 1;
 
-        const trade: Trade = {
+        sim.trades.push({
           type:        "exit",
           question:    pos.question,
           entry_price: pos.entry_price,
@@ -219,14 +265,12 @@ export async function run(options: RunOptions): Promise<void> {
           pnl:         Number(pnl.toFixed(2)),
           cost:        pos.cost,
           closed_at:   new Date().toISOString(),
-          // Carry analytics fields through from the original position
-          location:   pos.location,
-          date:       pos.date,
-          kelly_pct:  pos.kelly_pct,
-          ev:         pos.ev,
-          our_prob:   pos.our_prob
-        };
-        sim.trades.push(trade);
+          location:    pos.location,
+          date:        pos.date,
+          kelly_pct:   pos.kelly_pct,
+          ev:          pos.ev,
+          our_prob:    pos.our_prob
+        });
         delete positions[mid];
         ok(`Closed — PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
       } else {
