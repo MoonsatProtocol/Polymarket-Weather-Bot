@@ -76,7 +76,10 @@ async function main(): Promise<void> {
     .parseAsync();
 
   const cfg = await loadConfig();
-  validateKeys(cfg);
+  const live = Boolean(argv.live);
+
+  // Credentials and wallet checks are only required when executing real on-chain
+  // trades. This bot currently operates in simulation mode only — no credentials needed.
 
   if (argv.reset) {
     await resetSim();
@@ -87,17 +90,6 @@ async function main(): Promise<void> {
     await showPositions();
     return;
   }
-
-  const balanceUsd = await getWalletBalanceUsdViaClob(cfg);
-  console.info(`Wallet balance: $${balanceUsd.toFixed(2)} USD`);
-  if (balanceUsd < MIN_BALANCE_USD) {
-    console.error(
-      `Wallet balance ($${balanceUsd.toFixed(2)}) is below the minimum required. The minimum required balance is $${MIN_BALANCE_USD} USD to run the bot.`
-    );
-    process.exit(1);
-  }
-
-  const live = Boolean(argv.live);
   const intervalMin =
     live && typeof argv.interval === "number" && argv.interval > 0
       ? argv.interval
